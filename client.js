@@ -6,16 +6,16 @@
 //
 // What this plugin does: DSH Desktop's main process creates its window with a
 // fixed size and no x/y, so Electron centers it on the primary display every
-// launch. This half restores the last saved bounds with window.moveTo() /
-// window.resizeTo(), then keeps saving the live window position so a manual
-// drag is remembered for the next launch.
+// launch. This half restores the last saved bounds (position AND size) through
+// the host half's /window-position/move route, then keeps saving the live
+// window bounds so a manual drag or resize is remembered for the next launch.
 //
 // Design rules learned the hard way:
 //  - window.moveTo is a no-op during the DSH page's early boot (~first 2s),
 //    so the first attempt must wait for the page to settle.
-//  - The window is 1380x875 on a 1440x900 built-in display, so a moveTo to a
-//    built-in coordinate gets clamped to the right edge — that is NOT a
-//    failure of moveTo, it is Chromium keeping the window on screen.
+//  - window.moveTo is also clamped to the primary display by Chromium (the
+//    window is 1380x900 on a 1440x900 built-in), which is why the host half
+//    moves the window with osascript instead — that CAN cross displays.
 //  - Restore must be a short, bounded attempt. A long retry loop fights the
 //    user's own drag. After restore settles (success OR failure), saving
 //    resumes immediately so a manual drag is always remembered.
@@ -30,6 +30,7 @@ window.__ModuleLoader__.load({
     const RESTORE_RETRY_MS = 300;
     const RESTORE_MAX_ATTEMPTS = 3;
     const POSITION_EPSILON = 4;
+    const SIZE_EPSILON = 8;
 
     function snapshot() {
       return {
@@ -70,18 +71,28 @@ window.__ModuleLoader__.load({
     // window is 1380x900 on a 1440x900 built-in, so Chromium clamps it to the
     // primary display). The host half moves the window through osascript +
     // System Events instead, which CAN cross displays. This half just asks the
-    // host to move, then verifies the result.
+    // host to move (and, when a size was saved, to resize), then verifies the
+    // result. Older saves without a size still move fine — size is optional.
     async function restoreOnce(bounds) {
+      const target = { x: bounds.x, y: bounds.y };
+      const wantSize = finite(bounds.width) && finite(bounds.height);
+      if (wantSize) {
+        target.width = bounds.width;
+        target.height = bounds.height;
+      }
       const response = await fetch(MOVE_API, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ x: bounds.x, y: bounds.y }),
+        body: JSON.stringify(target),
       });
       if (!response.ok) throw new Error(`move POST failed: ${response.status}`);
       await new Promise((resolve) => setTimeout(resolve, 120));
       const after = snapshot();
-      return Math.abs(after.x - bounds.x) <= POSITION_EPSILON &&
+      const positionOk = Math.abs(after.x - bounds.x) <= POSITION_EPSILON &&
         Math.abs(after.y - bounds.y) <= POSITION_EPSILON;
+      if (!positionOk || !wantSize) return positionOk;
+      return Math.abs(after.width - bounds.width) <= SIZE_EPSILON &&
+        Math.abs(after.height - bounds.height) <= SIZE_EPSILON;
     }
 
     // Restore is a short, bounded attempt. It never blocks saving afterwards:

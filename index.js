@@ -5,11 +5,12 @@
 //   PUT /window-position/bounds  → persist { x, y, width, height }
 // Storage: ${DSH_HOME:-~/.dsh}/plugin-data/dsh-window-position/bounds.json
 //
-// The browser half (client.js) moves the DSH Desktop window with
-// window.moveTo()/window.resizeTo() and reports bounds back here. Same-origin
-// localStorage cannot carry this state across launches: the desktop app
-// reserves a fresh random webserver port on every start, so the page origin
-// changes each run. The file behind this route is the durable copy.
+// The browser half (client.js) asks this host half to move the DSH Desktop
+// window via /window-position/move (osascript + System Events, because
+// window.moveTo() cannot cross displays) and reports bounds back here.
+// Same-origin localStorage cannot carry this state across launches: the
+// desktop app reserves a fresh random webserver port on every start, so the
+// page origin changes each run. The file behind this route is the durable copy.
 //
 // Loopback request gate mirrors @liustack/modsearch's settings-card route:
 // loopback Host, no cross-site Sec-Fetch-Site, same-origin Origin when sent.
@@ -20,6 +21,7 @@ import { dirname, join } from 'node:path';
 import { execFile } from 'node:child_process';
 
 export const name = 'dsh-window-position';
+export { buildAppleScript };
 
 const ROUTE_PATH = '/window-position/bounds';
 const DIAGNOSTIC_PATH = '/window-position/diagnostic';
@@ -31,9 +33,20 @@ const LIMIT = { offset: 32768, width: 16384, height: 16384 };
 // 1380x900 on a 1440x900 built-in, so Chromium clamps it to the primary
 // display). osascript + System Events CAN cross displays (verified), so the
 // host half moves the window through Accessibility instead of the renderer.
-function moveWindow(x, y) {
+//
+// width/height are optional: when finite they are applied as the window size
+// too, so a manually resized window is restored as well as its position.
+function buildAppleScript(x, y, width, height) {
+  const statements = [`set position of window 1 to {${Math.round(x)}, ${Math.round(y)}}`];
+  if (Number.isFinite(width) && Number.isFinite(height)) {
+    statements.push(`set size of window 1 to {${Math.round(width)}, ${Math.round(height)}}`);
+  }
+  return `tell application "System Events" to tell process "DSH Desktop"\n${statements.join('\n')}\nend tell`;
+}
+
+function moveWindow(x, y, width, height) {
   return new Promise((resolve, reject) => {
-    const script = `tell application "System Events" to tell process "DSH Desktop" to set position of window 1 to {${Math.round(x)}, ${Math.round(y)}}`;
+    const script = buildAppleScript(x, y, width, height);
     execFile('osascript', ['-e', script], { timeout: 5000 }, (error, stdout, stderr) => {
       if (error) reject(new Error((stderr || error.message).trim()));
       else resolve();
@@ -46,20 +59,28 @@ function dataFile() {
   return join(home, 'plugin-data', 'dsh-window-position', 'bounds.json');
 }
 
-// Accepts only a plain {x,y,width,height} of finite numbers in sane ranges;
-// anything else (tampered file, partial write, wrong shape) reads as "no
-// saved state" so the browser half simply keeps the stock centered window.
+// Accepts only a plain object of finite numbers in sane ranges; anything else
+// (tampered file, partial write, wrong shape) reads as "no saved state" so the
+// browser half simply keeps the stock centered window.
+// x/y are required; width/height are OPTIONAL (older saves only had position),
+// so a position-only save still restores the move without changing the size.
 function normalize(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const out = {};
-  for (const key of ['x', 'y', 'width', 'height']) {
+  for (const key of ['x', 'y']) {
     const n = Number(value[key]);
     if (!Number.isFinite(n)) return null;
     out[key] = Math.round(n);
   }
   if (Math.abs(out.x) > LIMIT.offset || Math.abs(out.y) > LIMIT.offset) return null;
-  if (out.width < 200 || out.width > LIMIT.width) return null;
-  if (out.height < 120 || out.height > LIMIT.height) return null;
+  for (const key of ['width', 'height']) {
+    if (value[key] === undefined || value[key] === null) continue;
+    const n = Number(value[key]);
+    if (!Number.isFinite(n)) return null;
+    out[key] = Math.round(n);
+  }
+  if (out.width !== undefined && (out.width < 200 || out.width > LIMIT.width)) return null;
+  if (out.height !== undefined && (out.height < 120 || out.height > LIMIT.height)) return null;
   return out;
 }
 
@@ -205,7 +226,10 @@ export function apply(ctx) {
               send(422, { ok: false, error: 'invalid coordinates' });
               return;
             }
-            await moveWindow(x, y);
+            const width = Number(body.width);
+            const height = Number(body.height);
+            const wantSize = Number.isFinite(width) && Number.isFinite(height);
+            await moveWindow(x, y, wantSize ? width : undefined, wantSize ? height : undefined);
             send(200, { ok: true });
           } catch (error) {
             send(500, { ok: false, error: String(error?.message ?? error) });

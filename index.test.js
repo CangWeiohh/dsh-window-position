@@ -8,6 +8,24 @@ import assert from 'node:assert/strict';
 
 process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dsh-winpos-test-'));
 const plugin = await import('./index.js');
+const { buildAppleScript } = plugin;
+
+// The AppleScript that actually moves/resizes the window:
+//  - with size → sets position AND size
+//  - without size → sets position only (backward compatible)
+assert.equal(
+  buildAppleScript(1440, 100, 1187, 794),
+  'tell application "System Events" to tell process "DSH Desktop"\n' +
+    'set position of window 1 to {1440, 100}\n' +
+    'set size of window 1 to {1187, 794}\n' +
+    'end tell'
+);
+assert.equal(
+  buildAppleScript(1440, 100),
+  'tell application "System Events" to tell process "DSH Desktop"\n' +
+    'set position of window 1 to {1440, 100}\n' +
+    'end tell'
+);
 
 const registered = [];
 plugin.apply({
@@ -22,11 +40,16 @@ assert.equal(registered.some((entry) => entry.path === '/window-position/bounds'
 assert.equal(registered.some((entry) => entry.path === '/window-position/diagnostic'), true);
 assert.equal(registered.some((entry) => entry.path === '/window-position/move'), true);
 const route = registered.find((entry) => entry.path === '/window-position/bounds');
+const moveRoute = registered.find((entry) => entry.path === '/window-position/move');
 
 const server = createServer((req, res) => route.handler(req, res));
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
 const url = base + route.path;
+
+const moveServer = createServer((req, res) => moveRoute.handler(req, res));
+await new Promise((resolve) => moveServer.listen(0, '127.0.0.1', resolve));
+const moveUrl = `http://127.0.0.1:${moveServer.address().port}${moveRoute.path}`;
 
 try {
   // 1. GET with no saved state → ok, bounds null.
@@ -54,6 +77,24 @@ try {
   res = await fetch(url, { cache: 'no-store' });
   assert.deepEqual((await res.json()).bounds, bounds);
 
+  // 3b. Position-only save (old format, no width/height) is still accepted and
+  //     readable — backward compatibility for historical data.
+  res = await fetch(url, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ x: 3000, y: 500 }),
+  });
+  assert.equal(res.status, 200);
+  res = await fetch(url, { cache: 'no-store' });
+  assert.deepEqual((await res.json()).bounds, { x: 3000, y: 500 });
+  // restore the full-bounds save for the rest of the tests
+  res = await fetch(url, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(bounds),
+  });
+  assert.equal(res.status, 200);
+
   // 4. Garbage payload → 422, file untouched.
   res = await fetch(url, {
     method: 'PUT',
@@ -79,7 +120,24 @@ try {
   res = await fetch(url, { cache: 'no-store' });
   assert.deepEqual(await res.json(), { ok: true, bounds: null });
 
+  // 7. Move route: invalid coordinates → 422 before any osascript call.
+  res = await fetch(moveUrl, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ x: 'left', y: undefined }),
+  });
+  assert.equal(res.status, 422);
+
+  // 8. Move route: cross-origin → 403.
+  res = await fetch(moveUrl, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: 'http://evil.example' },
+    body: JSON.stringify({ x: 100, y: 100 }),
+  });
+  assert.equal(res.status, 403);
+
   console.log('host-half tests: all passed');
 } finally {
   server.close();
+  moveServer.close();
 }

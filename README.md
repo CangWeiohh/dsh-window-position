@@ -1,10 +1,10 @@
 # dsh-window-position
 
-一个 DeepSeek Harness（DSH）桌面版插件，让 DSH Desktop 记住窗口上次关闭时的屏幕和位置，启动后自动恢复。
+一个 DeepSeek Harness（DSH）桌面版插件，让 DSH Desktop 记住窗口上次关闭时的**屏幕、位置和大小**，启动后自动恢复。
 
 ## 解决的问题
 
-DSH Desktop 每次启动，主窗口都出现在**主显示器居中**，不会记住上次关闭时的屏幕和位置。本插件在启动后自动把窗口移回上次的位置（支持跨屏，例如恢复到外接显示器）。
+DSH Desktop 每次启动，主窗口都出现在**主显示器居中**，且尺寸是主进程写死的默认值，不会记住上次关闭时的屏幕、位置和大小。本插件在启动后自动把窗口移回上次的位置、恢复上次的大小（支持跨屏，例如恢复到外接显示器）。
 
 ## 安装
 
@@ -32,15 +32,15 @@ export DSH_HOME="$HOME/Library/Application Support/dsh-desktop/harness"
 
 ## 使用
 
-1. 重启 DSH Desktop，窗口会先在内建屏居中，约 1~2 秒后自动移到上次保存的位置。
-2. 手动把窗口拖到想要的屏幕和位置，**停留 3 秒以上**（让插件保存）。
-3. 再次重启，窗口会自动恢复到那个位置。
+1. 重启 DSH Desktop，窗口会先在内建屏居中，约 1~2 秒后自动移到上次保存的位置、恢复上次的大小。
+2. 手动把窗口拖到想要的屏幕和位置，再调整到你想要的大小，**停留 3 秒以上**（让插件保存）。
+3. 再次重启，窗口会自动恢复到那个位置和大小。
 
 ## 工作原理
 
-- **浏览器端**（`client.js`）：启动时请求宿主端移动窗口，之后每 3 秒保存当前窗口位置。
-- **宿主端**（`index.js`）：注册 HTTP 路由，把窗口坐标持久化到 `harness/plugin-data/dsh-window-position/bounds.json`，并用 `osascript` 移动窗口。
-- **为什么用 osascript 而不是 `window.moveTo()`**：真实 DSH Desktop 里 `window.moveTo()` 到外接屏坐标会被 Chromium 钳制回内建屏（窗口 1380×900 几乎占满内建屏 1440×900），而 osascript + System Events 可以跨屏移动。
+- **浏览器端**（`client.js`）：启动时请求宿主端移动窗口并恢复大小，之后每 3 秒保存当前窗口的位置和大小。
+- **宿主端**（`index.js`）：注册 HTTP 路由，把窗口坐标和尺寸持久化到 `harness/plugin-data/dsh-window-position/bounds.json`，并用 `osascript` 移动/调整窗口。
+- **为什么用 osascript 而不是 `window.moveTo()`**：真实 DSH Desktop 里 `window.moveTo()` 到外接屏坐标会被 Chromium 钳制回内建屏（窗口 1380×900 几乎占满内建屏 1440×900），而 osascript + System Events 可以跨屏移动窗口、调整窗口大小。
 
 ## 依赖
 
@@ -49,7 +49,7 @@ export DSH_HOME="$HOME/Library/Application Support/dsh-desktop/harness"
 
 ## 已知限制
 
-- 窗口启动时先在内建屏居中，约 1~2 秒后才跳到保存位置（只有官方主进程支持窗口状态持久化才能消除这次跳动）。
+- 窗口启动时先在内建屏居中、用默认大小，约 1~2 秒后才跳到保存位置并恢复大小（只有官方主进程支持窗口状态持久化才能消除这次跳动）。
 - 全屏状态不记录、不恢复。
 - 外接屏拔掉后，osascript 移动可能失败，插件会保留旧坐标，下次启动重试。
 

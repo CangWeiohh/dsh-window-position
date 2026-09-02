@@ -8,9 +8,9 @@
 
 **dsh-window-position** 是一个 DeepSeek Harness（DSH）桌面版插件，解决一个问题：
 
-> DSH Desktop 每次启动，主窗口都出现在**主显示器居中**，不会记住上次关闭时的屏幕和位置。
+> DSH Desktop 每次启动，主窗口都出现在**主显示器居中**、用默认大小，不会记住上次关闭时的屏幕、位置和大小。
 
-**根因**（已实证）：DSH Desktop 主进程 `createWindow()` 只给了固定尺寸（1380×900），不传 `x`/`y`，也没有任何窗口状态持久化。Electron 默认行为就是「未指定坐标 → 主显示器居中」。
+**根因**（已实证）：DSH Desktop 主进程 `createWindow()` 只给了固定尺寸（1380×900），不传 `x`/`y`，也没有任何窗口状态持久化。Electron 默认行为就是「未指定坐标 → 主显示器居中」。本插件同时记住并恢复**位置和大小**（保存 `x`、`y`、`width`、`height` 四个值）。
 
 ---
 
@@ -18,8 +18,8 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `client.js` | 浏览器端（渲染进程）：启动时请求宿主端移动窗口，之后每 3 秒保存当前窗口位置 |
-| `index.js` | 宿主端（harness 进程）：注册 HTTP 路由，持久化窗口坐标，用 osascript 移动窗口 |
+| `client.js` | 浏览器端（渲染进程）：启动时请求宿主端移动窗口并恢复大小，之后每 3 秒保存当前窗口的位置和大小 |
+| `index.js` | 宿主端（harness 进程）：注册 HTTP 路由，持久化窗口坐标和尺寸，用 osascript 移动/调整窗口 |
 | `cordis.patch.yml` | 插件加载声明（一个 loader entry） |
 | `package.json` | 包清单，`dsh.client` 声明浏览器端入口 |
 | `index.test.js` | 宿主端单测（路由 + 持久化 + 鉴权） |
@@ -57,7 +57,14 @@ export DSH_HOME="$HOME/Library/Application Support/dsh-desktop/harness"
 
 - `window.moveTo()` 在**独立 Electron** 里可以跨屏移动窗口（实测成功）。
 - 但在**真实 DSH Desktop** 里，`window.moveTo()` 到外接屏坐标会被 Chromium **钳制回内建屏右边缘**，无法跨屏。原因是窗口 1380×900 几乎占满内建屏 1440×900（只剩 60px 水平余量）。
-- **`osascript` + System Events 可以跨屏移动窗口**（实测成功），所以宿主端用 osascript 移动，而不是渲染进程的 moveTo。
+- **`osascript` + System Events 可以跨屏移动窗口、调整窗口大小**（实测成功），所以宿主端用 osascript 移动，而不是渲染进程的 moveTo。
+
+### 1b. 大小恢复也走 osascript
+
+- `bounds.json` 里保存 `{x, y, width, height}` 四个值，位置和大小一起恢复。
+- osascript 脚本同时执行 `set position of window 1 to {x, y}` 和 `set size of window 1 to {w, h}`。
+- 旧的（没有 `width`/`height` 的）历史数据仍然兼容：只移动位置、不改变大小。
+- 恢复校验：位置用 4px 容差，大小用 8px 容差（`client.js` 里的 `POSITION_EPSILON` / `SIZE_EPSILON`）。
 
 ### 2. 移动窗口需要 Accessibility 权限
 
@@ -84,8 +91,8 @@ $DSH_HOME/plugin-data/dsh-window-position/bounds.json
 ## 验证方式
 
 1. 完全退出 DSH Desktop（Cmd+Q），重新打开。
-2. 窗口先在内建屏居中（主进程默认，插件改不了），约 1~2 秒后自动移到上次保存的位置。
-3. 手动拖到目标屏幕和位置，停留 3 秒以上（让插件保存），再次重启验证恢复。
+2. 窗口先在内建屏居中、用默认大小（主进程默认，插件改不了），约 1~2 秒后自动移到上次保存的位置、恢复上次的大小。
+3. 手动把窗口拖到目标屏幕和位置、调整到想要的大小，停留 3 秒以上（让插件保存），再次重启验证恢复。
 
 诊断信息（可选）：
 
@@ -101,6 +108,6 @@ cat "$HOME/Library/Application Support/dsh-desktop/harness/plugin-data/dsh-windo
 
 ## 已知限制
 
-- 窗口启动时**先在内建屏居中**，约 1~2 秒后才跳到保存位置（只有官方主进程支持窗口状态持久化才能消除这次跳动）。
+- 窗口启动时**先在内建屏居中、用默认大小**，约 1~2 秒后才跳到保存位置并恢复大小（只有官方主进程支持窗口状态持久化才能消除这次跳动）。
 - 全屏状态不记录、不恢复。
 - 外接屏拔掉后，osascript 移动可能失败，插件会保留旧坐标，下次启动重试。
