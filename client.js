@@ -28,7 +28,9 @@ window.__ModuleLoader__.load({
     const POLL_MS = 3000;
     const RESTORE_INITIAL_DELAY_MS = 800;
     const RESTORE_RETRY_MS = 300;
-    const RESTORE_MAX_ATTEMPTS = 3;
+    // DSH 0.9.x boots slower (heavier bundle, show:false window); retries must
+    // cover a longer settling window without burning wall time on each miss.
+    const RESTORE_MAX_ATTEMPTS = 10;
     const POSITION_EPSILON = 4;
     const SIZE_EPSILON = 8;
 

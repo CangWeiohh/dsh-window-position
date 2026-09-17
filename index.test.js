@@ -41,6 +41,7 @@ assert.equal(registered.some((entry) => entry.path === '/window-position/diagnos
 assert.equal(registered.some((entry) => entry.path === '/window-position/move'), true);
 const route = registered.find((entry) => entry.path === '/window-position/bounds');
 const moveRoute = registered.find((entry) => entry.path === '/window-position/move');
+const diagRoute = registered.find((entry) => entry.path === '/window-position/diagnostic');
 
 const server = createServer((req, res) => route.handler(req, res));
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -50,6 +51,10 @@ const url = base + route.path;
 const moveServer = createServer((req, res) => moveRoute.handler(req, res));
 await new Promise((resolve) => moveServer.listen(0, '127.0.0.1', resolve));
 const moveUrl = `http://127.0.0.1:${moveServer.address().port}${moveRoute.path}`;
+
+const diagServer = createServer((req, res) => diagRoute.handler(req, res));
+await new Promise((resolve) => diagServer.listen(0, '127.0.0.1', resolve));
+const diagUrl = `http://127.0.0.1:${diagServer.address().port}${diagRoute.path}`;
 
 try {
   // 1. GET with no saved state → ok, bounds null.
@@ -136,8 +141,28 @@ try {
   });
   assert.equal(res.status, 403);
 
+  // 9. Diagnostic history: PUTs append (not overwrite) so a slow-restore
+  //    investigation sees the full per-attempt timeline.
+  for (const stage of ['restore-start', 'restore-attempt', 'restore-finished']) {
+    res = await fetch(diagUrl, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ stage }),
+    });
+    assert.equal(res.status, 200);
+  }
+  res = await fetch(diagUrl, { cache: 'no-store' });
+  const history = (await res.json()).diagnostic;
+  assert.equal(Array.isArray(history), true);
+  assert.deepEqual(history.map((entry) => entry.value.stage), [
+    'restore-start',
+    'restore-attempt',
+    'restore-finished',
+  ]);
+
   console.log('host-half tests: all passed');
 } finally {
   server.close();
   moveServer.close();
+  diagServer.close();
 }

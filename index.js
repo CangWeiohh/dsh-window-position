@@ -47,7 +47,9 @@ function buildAppleScript(x, y, width, height) {
 function moveWindow(x, y, width, height) {
   return new Promise((resolve, reject) => {
     const script = buildAppleScript(x, y, width, height);
-    execFile('osascript', ['-e', script], { timeout: 5000 }, (error, stdout, stderr) => {
+    // 2s cap: during DSH 0.9.x boot the app is busy and Apple Events can hang;
+    // a 5s timeout burned ~5s PER retry attempt (3 x 5.4s ≈ 16.5s slow restore).
+    execFile('osascript', ['-e', script], { timeout: 2000 }, (error, stdout, stderr) => {
       if (error) reject(new Error((stderr || error.message).trim()));
       else resolve();
     });
@@ -113,11 +115,24 @@ function readDiagnostic() {
   }
 }
 
+const DIAGNOSTIC_KEEP = 60;
+
+// Append (not overwrite) so a slow-restore investigation can see the full
+// per-attempt timeline of the last launch(es), not just the final event.
 function writeDiagnostic(value) {
   const file = diagnosticFile();
   mkdirSync(dirname(file), { recursive: true });
+  let history = [];
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8'));
+    if (Array.isArray(parsed)) history = parsed;
+  } catch {
+    // first write or unreadable file — start a fresh history
+  }
+  history.push(value);
+  if (history.length > DIAGNOSTIC_KEEP) history = history.slice(-DIAGNOSTIC_KEEP);
   const tmp = `${file}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(value)}\n`, 'utf8');
+  writeFileSync(tmp, `${JSON.stringify(history)}\n`, 'utf8');
   renameSync(tmp, file);
 }
 
@@ -186,8 +201,7 @@ export function apply(ctx) {
           if (req.method === 'GET') {
             send(200, { ok: true, diagnostic: readDiagnostic() });
             return;
-          }
-          if (req.method === 'PUT' || req.method === 'POST') {
+          }          if (req.method === 'PUT' || req.method === 'POST') {
             try {
               const value = JSON.parse(await readBody(req));
               writeDiagnostic({ at: new Date().toISOString(), value });
