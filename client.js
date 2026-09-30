@@ -4,11 +4,12 @@
 // with a factory returning cordis-plugin exports), like the host half with
 // zero dsh package imports.
 //
-// What this plugin does: DSH Desktop's main process creates its window with a
-// fixed size and no x/y, so Electron centers it on the primary display every
-// launch. This half restores the last saved bounds (position AND size) through
-// the host half's /window-position/move route, then keeps saving the live
-// window bounds so a manual drag or resize is remembered for the next launch.
+// What this plugin does: the desktop client's main process (DeepSeek Harness
+// or DSH Desktop) creates its window with a fixed size and no x/y, so Electron
+// centers it on the primary display every launch. This half restores the last
+// saved bounds (position AND size) through the host half's /window-position/
+// move route, then keeps saving the live window bounds so a manual drag or
+// resize is remembered for the next launch.
 //
 // Design rules learned the hard way:
 //  - window.moveTo is a no-op during the DSH page's early boot (~first 2s),

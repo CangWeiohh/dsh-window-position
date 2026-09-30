@@ -1,7 +1,7 @@
 {
   "name": "dsh-window-position",
   "version": "0.1.0",
-  "description": "Restores the DSH Desktop window to its last position, size, and display across app restarts (browser half asks the host; host half moves/resizes via osascript + System Events and persists bounds).",
+  "description": "Restores the desktop client window (DeepSeek Harness or DSH Desktop) to its last position, size, and display across app restarts (browser half asks the host; host half detects the app process and moves/resizes via osascript + System Events and persists bounds).",
   "type": "module",
   "main": "index.js",
   "exports": {

@@ -5,15 +5,18 @@
 //   PUT /window-position/bounds  → persist { x, y, width, height }
 // Storage: ${DSH_HOME:-~/.dsh}/plugin-data/dsh-window-position/bounds.json
 //
-// The browser half (client.js) asks this host half to move the DSH Desktop
-// window via /window-position/move (osascript + System Events, because
-// window.moveTo() cannot cross displays) and reports bounds back here.
-// Same-origin localStorage cannot carry this state across launches: the
-// desktop app reserves a fresh random webserver port on every start, so the
-// page origin changes each run. The file behind this route is the durable copy.
+// The browser half (client.js) asks this host half to move the DSH window via
+// /window-position/move (osascript + System Events, because window.moveTo()
+// cannot cross displays) and reports bounds back here.
+// Same-origin localStorage cannot carry this state across launches where the
+// webserver port changes per run (DSH Desktop reserves a random port; the
+// DeepSeek Harness client pins 19387 but the file copy is durable either way).
 //
 // Loopback request gate mirrors @liustack/modsearch's settings-card route:
 // loopback Host, no cross-site Sec-Fetch-Site, same-origin Origin when sent.
+// The DeepSeek Harness client additionally loads the page from dsh-app://app
+// and forwards API calls to the webserver with those headers stripped, which
+// passes this gate unchanged.
 
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -29,6 +32,47 @@ const MOVE_PATH = '/window-position/move';
 const MAX_BODY_BYTES = 2048;
 const LIMIT = { offset: 32768, width: 16384, height: 16384 };
 
+// Two known desktop shells ship this harness: DSH Desktop (process "DSH
+// Desktop") and the official DeepSeek Harness client (process "DeepSeek
+// Harness"). osascript can only target one process name, so the host half
+// probes the candidates once and caches the first that exists; the probe runs
+// in the same process tree as the later moves, so TCC attributes it to the
+// same app. DSH_WINDOW_PROCESS_NAME overrides the probe entirely.
+const PROCESS_CANDIDATES = ['DeepSeek Harness', 'DSH Desktop'];
+
+let resolvedProcessName;
+
+function processNameCandidates() {
+  const override = process.env.DSH_WINDOW_PROCESS_NAME;
+  if (typeof override === 'string' && override.trim() !== '') return [override.trim()];
+  return PROCESS_CANDIDATES;
+}
+
+function probeProcessExists(name) {
+  return new Promise((resolve) => {
+    const script = `tell application "System Events" to exists process "${name}"`;
+    execFile('osascript', ['-e', script], { timeout: 2000 }, (error, stdout) => {
+      resolve(!error && String(stdout).trim() === 'true');
+    });
+  });
+}
+
+async function resolveProcessName() {
+  if (resolvedProcessName !== undefined) return resolvedProcessName;
+  const candidates = processNameCandidates();
+  for (const name of candidates) {
+    // eslint-disable-next-line no-await-in-loop -- probe is cheap and must be ordered
+    if (await probeProcessExists(name)) {
+      resolvedProcessName = name;
+      return name;
+    }
+  }
+  // No candidate is running (or Accessibility is denied): default to the
+  // official client and let the move surface the real error in diagnostics.
+  resolvedProcessName = candidates[0];
+  return resolvedProcessName;
+}
+
 // window.moveTo() cannot cross displays in the real DSH Desktop (the window is
 // 1380x900 on a 1440x900 built-in, so Chromium clamps it to the primary
 // display). osascript + System Events CAN cross displays (verified), so the
@@ -36,17 +80,18 @@ const LIMIT = { offset: 32768, width: 16384, height: 16384 };
 //
 // width/height are optional: when finite they are applied as the window size
 // too, so a manually resized window is restored as well as its position.
-function buildAppleScript(x, y, width, height) {
+function buildAppleScript(x, y, width, height, processName = 'DeepSeek Harness') {
   const statements = [`set position of window 1 to {${Math.round(x)}, ${Math.round(y)}}`];
   if (Number.isFinite(width) && Number.isFinite(height)) {
     statements.push(`set size of window 1 to {${Math.round(width)}, ${Math.round(height)}}`);
   }
-  return `tell application "System Events" to tell process "DSH Desktop"\n${statements.join('\n')}\nend tell`;
+  return `tell application "System Events" to tell process "${processName}"\n${statements.join('\n')}\nend tell`;
 }
 
-function moveWindow(x, y, width, height) {
+async function moveWindow(x, y, width, height) {
+  const processName = await resolveProcessName();
+  const script = buildAppleScript(x, y, width, height, processName);
   return new Promise((resolve, reject) => {
-    const script = buildAppleScript(x, y, width, height);
     // 2s cap: during DSH 0.9.x boot the app is busy and Apple Events can hang;
     // a 5s timeout burned ~5s PER retry attempt (3 x 5.4s ≈ 16.5s slow restore).
     execFile('osascript', ['-e', script], { timeout: 2000 }, (error, stdout, stderr) => {

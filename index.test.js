@@ -13,17 +13,26 @@ const { buildAppleScript } = plugin;
 // The AppleScript that actually moves/resizes the window:
 //  - with size → sets position AND size
 //  - without size → sets position only (backward compatible)
+//  - process name defaults to the official client and is parameterized so the
+//    same build serves "DeepSeek Harness" and "DSH Desktop" shells
 assert.equal(
   buildAppleScript(1440, 100, 1187, 794),
-  'tell application "System Events" to tell process "DSH Desktop"\n' +
+  'tell application "System Events" to tell process "DeepSeek Harness"\n' +
     'set position of window 1 to {1440, 100}\n' +
     'set size of window 1 to {1187, 794}\n' +
     'end tell'
 );
 assert.equal(
   buildAppleScript(1440, 100),
+  'tell application "System Events" to tell process "DeepSeek Harness"\n' +
+    'set position of window 1 to {1440, 100}\n' +
+    'end tell'
+);
+assert.equal(
+  buildAppleScript(1440, 100, 1187, 794, 'DSH Desktop'),
   'tell application "System Events" to tell process "DSH Desktop"\n' +
     'set position of window 1 to {1440, 100}\n' +
+    'set size of window 1 to {1187, 794}\n' +
     'end tell'
 );
 
