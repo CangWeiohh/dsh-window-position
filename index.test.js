@@ -37,6 +37,7 @@ assert.equal(
 );
 
 const registered = [];
+process.env.DSH_WINDOW_POSITION_HOST_RESTORE = 'off'; // keep real osascript out of unit tests
 plugin.apply({
   inject(names, fn) {
     if (names.includes('webServer')) {
@@ -168,6 +169,16 @@ try {
     'restore-attempt',
     'restore-finished',
   ]);
+
+  // 10. Host auto-restore with the kill switch set resolves immediately —
+  //     no bounds read, no osascript, no window movement. (It must check the
+  //     switch itself, not only the apply() trigger, so direct callers are
+  //     safe even when a bounds file exists.)
+  const { writeFileSync: wf, mkdirSync: mk } = await import('node:fs');
+  const boundsDir = join(process.env.DSH_HOME, 'plugin-data', 'dsh-window-position');
+  mk(boundsDir, { recursive: true });
+  wf(join(boundsDir, 'bounds.json'), JSON.stringify({ x: 100, y: 100 }));
+  await plugin.runHostAutoRestore(); // must resolve without touching osascript
 
   console.log('host-half tests: all passed');
 } finally {

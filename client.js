@@ -6,17 +6,18 @@
 //
 // What this plugin does: the desktop client's main process (DeepSeek Harness
 // or DSH Desktop) creates its window with a fixed size and no x/y, so Electron
-// centers it on the primary display every launch. This half restores the last
-// saved bounds (position AND size) through the host half's /window-position/
-// move route, then keeps saving the live window bounds so a manual drag or
-// resize is remembered for the next launch.
+// centers it on the primary display every launch. The HOST half auto-restores
+// the saved bounds the moment the window appears (it boots earlier than the
+// web app, so this is fast); this half is the fallback plus the live saver:
+// it verifies the restore, retries if the window was not in place yet, and
+// keeps saving the live window bounds so a manual drag or resize is
+// remembered for the next launch.
 //
 // Design rules learned the hard way:
-//  - window.moveTo is a no-op during the DSH page's early boot (~first 2s),
-//    so the first attempt must wait for the page to settle.
-//  - window.moveTo is also clamped to the primary display by Chromium (the
-//    window is 1380x900 on a 1440x900 built-in), which is why the host half
-//    moves the window with osascript instead — that CAN cross displays.
+//  - window.moveTo is a no-op during the page's early boot and is clamped to
+//    the primary display by Chromium anyway, which is why the host half moves
+//    the window with osascript — that CAN cross displays and runs outside the
+//    renderer's busy boot window.
 //  - Restore must be a short, bounded attempt. A long retry loop fights the
 //    user's own drag. After restore settles (success OR failure), saving
 //    resumes immediately so a manual drag is always remembered.
@@ -27,8 +28,12 @@ window.__ModuleLoader__.load({
     const DIAGNOSTIC_API = '/window-position/diagnostic';
     const MOVE_API = '/window-position/move';
     const POLL_MS = 3000;
-    const RESTORE_INITIAL_DELAY_MS = 800;
-    const RESTORE_RETRY_MS = 300;
+    // The host half usually restores before the web app finishes booting, so
+    // this half verifies first (skipping the move when already in place) and
+    // only falls back to its own move attempts.
+    const RESTORE_INITIAL_DELAY_MS = 150;
+    const RESTORE_RETRY_MS = 200;
+    const RESTORE_SETTLE_MS = 80;
     // DSH 0.9.x boots slower (heavier bundle, show:false window); retries must
     // cover a longer settling window without burning wall time on each miss.
     const RESTORE_MAX_ATTEMPTS = 10;
@@ -42,6 +47,14 @@ window.__ModuleLoader__.load({
         width: Math.round(window.outerWidth),
         height: Math.round(window.outerHeight),
       };
+    }
+
+    function withinEpsilon(after, target, wantSize) {
+      const positionOk = Math.abs(after.x - target.x) <= POSITION_EPSILON &&
+        Math.abs(after.y - target.y) <= POSITION_EPSILON;
+      if (!positionOk || !wantSize) return positionOk;
+      return Math.abs(after.width - target.width) <= SIZE_EPSILON &&
+        Math.abs(after.height - target.height) <= SIZE_EPSILON;
     }
 
     function finite(value) {
@@ -73,9 +86,10 @@ window.__ModuleLoader__.load({
     // window.moveTo() cannot cross displays in the real DSH Desktop (the
     // window is 1380x900 on a 1440x900 built-in, so Chromium clamps it to the
     // primary display). The host half moves the window through osascript +
-    // System Events instead, which CAN cross displays. This half just asks the
-    // host to move (and, when a size was saved, to resize), then verifies the
-    // result. Older saves without a size still move fine — size is optional.
+    // System Events instead, which CAN cross displays. This half verifies the
+    // current position first — when the host's auto-restore already put the
+    // window in place, no move is issued at all. Older saves without a size
+    // still move fine — size is optional.
     async function restoreOnce(bounds) {
       const target = { x: bounds.x, y: bounds.y };
       const wantSize = finite(bounds.width) && finite(bounds.height);
@@ -83,19 +97,17 @@ window.__ModuleLoader__.load({
         target.width = bounds.width;
         target.height = bounds.height;
       }
+      // Fast path: the host half may have restored already — verify, and skip
+      // the move entirely when the window is in place.
+      if (withinEpsilon(snapshot(), target, wantSize)) return { ok: true, moved: false };
       const response = await fetch(MOVE_API, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(target),
       });
       if (!response.ok) throw new Error(`move POST failed: ${response.status}`);
-      await new Promise((resolve) => setTimeout(resolve, 120));
-      const after = snapshot();
-      const positionOk = Math.abs(after.x - bounds.x) <= POSITION_EPSILON &&
-        Math.abs(after.y - bounds.y) <= POSITION_EPSILON;
-      if (!positionOk || !wantSize) return positionOk;
-      return Math.abs(after.width - bounds.width) <= SIZE_EPSILON &&
-        Math.abs(after.height - bounds.height) <= SIZE_EPSILON;
+      await new Promise((resolve) => setTimeout(resolve, RESTORE_SETTLE_MS));
+      return { ok: withinEpsilon(snapshot(), target, wantSize), moved: true };
     }
 
     // Restore is a short, bounded attempt. It never blocks saving afterwards:
@@ -109,9 +121,14 @@ window.__ModuleLoader__.load({
         if (!bounds) return;
         await new Promise((resolve) => setTimeout(resolve, RESTORE_INITIAL_DELAY_MS));
         for (let attempt = 0; attempt < RESTORE_MAX_ATTEMPTS; attempt += 1) {
-          const ok = await restoreOnce(bounds);
-          diagnostic('restore-attempt', { attempt: attempt + 1, target: bounds, ok });
-          if (ok) return;
+          const result = await restoreOnce(bounds);
+          diagnostic('restore-attempt', {
+            attempt: attempt + 1,
+            target: bounds,
+            ok: result.ok,
+            moved: result.moved,
+          });
+          if (result.ok) return;
           await new Promise((resolve) => setTimeout(resolve, RESTORE_RETRY_MS));
         }
       } catch (error) {

@@ -24,7 +24,7 @@ import { dirname, join } from 'node:path';
 import { execFile } from 'node:child_process';
 
 export const name = 'dsh-window-position';
-export { buildAppleScript };
+export { buildAppleScript, runHostAutoRestore };
 
 const ROUTE_PATH = '/window-position/bounds';
 const DIAGNOSTIC_PATH = '/window-position/diagnostic';
@@ -99,6 +99,60 @@ async function moveWindow(x, y, width, height) {
       else resolve();
     });
   });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Host-side auto-restore: the harness process boots BEFORE the Electron window
+// is shown, so polling here catches the window the moment it enters the
+// accessibility hierarchy (~0-300ms after it appears) — no dependency on web
+// app boot or renderer network readiness (busy boots queued renderer fetches
+// for 20s+, which made renderer-driven restore take 2.6s-24s). The loop
+// re-reads bounds.json every attempt and aborts when the file changed, so it
+// never fights a position the renderer just saved (user's own drag).
+const HOST_RESTORE_INTERVAL_MS = 300;
+const HOST_RESTORE_MAX_ATTEMPTS = 60; // ≈18s of boot coverage
+let hostRestoreStarted = false;
+
+function hostAutoRestoreDisabled() {
+  return process.env.DSH_WINDOW_POSITION_HOST_RESTORE === 'off';
+}
+
+async function runHostAutoRestore() {
+  // The kill switch is checked here too, not just at the apply() trigger:
+  // direct callers (tests, tools) must never be able to move a real window
+  // through a bounds file they did not intend to act on.
+  if (hostAutoRestoreDisabled()) return;
+  const initial = readBounds();
+  if (!initial) return;
+  const initialJson = JSON.stringify(initial);
+  writeDiagnostic({ stage: 'host-restore-start', target: initial });
+  for (let attempt = 1; attempt <= HOST_RESTORE_MAX_ATTEMPTS; attempt += 1) {
+    const current = readBounds();
+    if (!current || JSON.stringify(current) !== initialJson) {
+      writeDiagnostic({ stage: 'host-restore-abort', attempt, reason: 'bounds changed' });
+      return;
+    }
+    try {
+      await moveWindow(initial.x, initial.y, initial.width, initial.height);
+      writeDiagnostic({ stage: 'host-restore-attempt', attempt, ok: true });
+      return;
+    } catch (error) {
+      // Window not in the accessibility hierarchy yet (or Accessibility
+      // denied) — the window simply has not appeared; keep the loop bounded.
+      if (attempt === HOST_RESTORE_MAX_ATTEMPTS) {
+        writeDiagnostic({
+          stage: 'host-restore-attempt',
+          attempt,
+          ok: false,
+          error: String(error?.message ?? error).slice(0, 200),
+        });
+      }
+    }
+    await sleep(HOST_RESTORE_INTERVAL_MS);
+  }
 }
 
 function dataFile() {
@@ -330,6 +384,16 @@ export function apply(ctx) {
           res.writeHead(405).end();
         },
       });
+
+      // Restore from the host as early as possible: the harness boots before
+      // the Electron window is shown, so this loop usually moves the window
+      // within ~300ms of it appearing. The browser half stays as a fallback.
+      if (!hostRestoreStarted && !hostAutoRestoreDisabled()) {
+        hostRestoreStarted = true;
+        void runHostAutoRestore().catch((error) => {
+          console.error(`[dsh-window-position] host auto-restore failed: ${error}`);
+        });
+      }
     } catch (error) {
       console.error(`[dsh-window-position] route registration skipped: ${error}`);
     }
